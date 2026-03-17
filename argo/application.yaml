@@ -1,0 +1,26 @@
+# Intentionally risky Argo CD Application for policy enforcement demo
+# Issues: automated sync, prune, selfHeal, HEAD revision, no env separation
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/org/demo-github-argo-insecure-app.git
+    path: k8s
+    # Uses HEAD - no promotion, no version pinning
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo-app
+  # Risky: automated sync without safeguards
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+  # No sync windows, no manual approval
+  # Direct deployment - no staging/prod promotion path

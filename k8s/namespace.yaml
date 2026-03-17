@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-app
+  # Minimal labels - weak traceability
+  labels:
+    app: demo-app

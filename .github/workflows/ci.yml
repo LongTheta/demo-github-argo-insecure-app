@@ -1,0 +1,69 @@
+# GitHub Actions workflow mirroring GitLab CI pipeline
+# Stages: Build → Test → Deploy
+
+name: CI
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: alpine:latest
+      options: --entrypoint ""
+    steps:
+      - name: Run placeholder tests
+        run: |
+          echo "Running placeholder tests"
+          wget -qO- https://example.com || true
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: test
+    container:
+      image: bitnami/kubectl:latest
+      options: --entrypoint ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Replace placeholder image in deployment
+        run: |
+          sed -i "s|image: .*|image: ghcr.io/${{ github.repository }}:latest|" k8s/deployment.yaml
+
+      - name: Validate Kubernetes manifests (dry-run)
+        run: |
+          kubectl apply -f k8s/namespace.yaml --dry-run=client --validate=false
+          kubectl apply -f k8s/deployment.yaml --dry-run=client --validate=false
+          kubectl apply -f k8s/service.yaml --dry-run=client --validate=false
