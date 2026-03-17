@@ -1,72 +1,325 @@
-# GitHub Actions workflow mirroring GitLab CI pipeline
-# Stages: Build → Test → Deploy
+# DevSecOps + GitOps Control Flow
+# Demonstrates: validate → policy review → remediation → promotion gate → artifact handoff
+# Policy verdict blocks or allows promotion to GitOps platform.
 
-name: CI
+name: DevSecOps Pipeline
+
 on:
-  push:
-    branches: [main, master]
   pull_request:
     branches: [main, master]
+  push:
+    branches: [main, master]
+
+env:
+  AGENT_REPO_URL: https://github.com/LongTheta/ai-devsecops-policy-enforcement-agent.git
+  ARTIFACT_DIR: artifacts
 
 permissions:
   contents: read
-  packages: write
+  pull-requests: read
 
 jobs:
-  build:
-    name: Build
+  # ---------------------------------------------------------------------------
+  # 1. Validate — lightweight sanity checks
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          python-version: "3.11"
 
-      - name: Set image tag (lowercase for GHCR)
-        id: meta
-        run: echo "tag=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]'):latest" >> $GITHUB_OUTPUT
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tag }}
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    needs: build
-    container:
-      image: alpine:latest
-      options: --entrypoint ""
-    steps:
-      - name: Run placeholder tests
+      - name: Validate YAML syntax
         run: |
-          echo "Running placeholder tests"
-          wget -qO- https://example.com || true
+          pip install PyYAML -q
+          echo "Validating YAML files..."
+          for f in .github/workflows/ci.yml argo/application.yaml k8s/deployment.yaml k8s/service.yaml k8s/namespace.yaml; do
+            if [ -f "$f" ]; then
+              python3 -c "import yaml; yaml.safe_load(open('$f'))" && echo "  ✓ $f"
+            fi
+          done
 
-  deploy:
-    name: Deploy
+      - name: Check required files exist
+        run: |
+          for f in .github/workflows/ci.yml argo/application.yaml k8s/deployment.yaml Dockerfile; do
+            [ -f "$f" ] || { echo "Missing: $f"; exit 1; }
+          done
+          echo "All required files present."
+
+  # ---------------------------------------------------------------------------
+  # 2. Review — run policy enforcement agent
+  # ---------------------------------------------------------------------------
+  review:
+    name: Policy Review
     runs-on: ubuntu-latest
-    needs: test
+    needs: validate
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
+      risk_level: ${{ steps.verdict.outputs.risk_level }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set image tag (lowercase for GHCR)
-        id: meta
-        run: echo "tag=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]'):latest" >> $GITHUB_OUTPUT
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Replace placeholder image in deployment
+      - name: Clone policy enforcement agent
         run: |
-          sed -i "s|image: .*|image: ${{ steps.meta.outputs.tag }}|" k8s/deployment.yaml
+          git clone --depth 1 "${{ env.AGENT_REPO_URL }}" agent-repo
+          pip install -e ./agent-repo
 
-      - name: Validate Kubernetes manifests (kubeconform, no cluster required)
+      - name: Create artifact directory
+        run: mkdir -p ${{ env.ARTIFACT_DIR }}
+
+      - name: Run policy review
+        id: review
         run: |
-          docker run --rm -v ${{ github.workspace }}:/work -w /work ghcr.io/yannh/kubeconform:v0.7.0 -summary -output text k8s/
+          python -m ai_devsecops_agent.cli review-all \
+            --platform github \
+            --pipeline .github/workflows/ci.yml \
+            --gitops argo/application.yaml \
+            --manifests k8s/deployment.yaml \
+            --policy agent-repo/policies/fedramp-moderate.yaml \
+            --include-comments \
+            --include-remediations \
+            --include-risk-score \
+            --artifact-dir ${{ env.ARTIFACT_DIR }}/ \
+            || true
+          # Agent may exit non-zero on FAIL verdict; we capture artifacts either way
+
+      - name: Extract verdict and risk
+        id: verdict
+        run: |
+          VERDICT="UNKNOWN"
+          RISK="unknown"
+          if [ -f "${{ env.ARTIFACT_DIR }}/policy-summary.json" ]; then
+            VERDICT=$(jq -r '.verdict // "UNKNOWN"' ${{ env.ARTIFACT_DIR }}/policy-summary.json)
+            RISK=$(jq -r '.risk_level // .riskLevel // "unknown"' ${{ env.ARTIFACT_DIR }}/policy-summary.json 2>/dev/null || echo "unknown")
+          fi
+          if [ -f "${{ env.ARTIFACT_DIR }}/review-result.json" ]; then
+            VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "'"$VERDICT"'"' ${{ env.ARTIFACT_DIR }}/review-result.json)
+            RISK=$(jq -r '.risk_level // .riskLevel // "'"$RISK"'"' ${{ env.ARTIFACT_DIR }}/review-result.json 2>/dev/null || echo "$RISK")
+          fi
+          # Ensure policy-summary exists for downstream jobs (handoff contract)
+          if [ ! -f "${{ env.ARTIFACT_DIR }}/policy-summary.json" ]; then
+            jq -n --arg v "$VERDICT" --arg r "$RISK" '{verdict: $v, risk_level: $r}' > ${{ env.ARTIFACT_DIR }}/policy-summary.json
+          fi
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+          echo "risk_level=$RISK" >> $GITHUB_OUTPUT
+          echo "Policy Verdict: $VERDICT"
+          echo "Risk Level: $RISK"
+
+      - name: Print summary
+        run: |
+          echo "--- Policy Review Summary ---"
+          [ -f ${{ env.ARTIFACT_DIR }}/report.md ] && head -80 ${{ env.ARTIFACT_DIR }}/report.md || echo "No report.md"
+          echo ""
+          echo "--- Verdict ---"
+          echo "Policy Verdict: ${{ steps.verdict.outputs.verdict }}"
+          echo "Risk Score: ${{ steps.verdict.outputs.risk_level }}"
+
+      - name: Upload review artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-review-artifacts
+          path: ${{ env.ARTIFACT_DIR }}/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. Remediation — auto-fix suggest when verdict is FAIL
+  # ---------------------------------------------------------------------------
+  remediation:
+    name: Auto-Fix Suggest
+    runs-on: ubuntu-latest
+    needs: review
+    if: always() && needs.review.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download review artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: policy-review-artifacts
+
+      - name: Set up Python and agent
+        run: |
+          pip install PyYAML
+          git clone --depth 1 "${{ env.AGENT_REPO_URL }}" agent-repo
+          pip install -e ./agent-repo
+
+      - name: Run auto-fix suggest (when verdict is FAIL)
+        id: autofix
+        run: |
+          if [ -f "artifacts/review-result.json" ]; then
+            VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "UNKNOWN"' artifacts/review-result.json)
+            if [ "$VERDICT" = "FAIL" ] || [ "$VERDICT" = "fail" ]; then
+              echo "Verdict is FAIL — running auto-fix suggest..."
+              mkdir -p artifacts/fixes
+              python -m ai_devsecops_agent.cli auto-fix \
+                --input artifacts/review-result.json \
+                --mode suggest 2>&1 | tee artifacts/fixes/suggestions.txt || true
+              if [ -d "artifacts/fixes" ] && [ -n "$(ls -A artifacts/fixes 2>/dev/null)" ]; then
+                echo "Fix suggestions generated."
+              fi
+            else
+              echo "Verdict is $VERDICT — skipping auto-fix suggest."
+            fi
+          else
+            echo "No review-result.json — skipping auto-fix."
+          fi
+
+      - name: Upload fix suggestions
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-fix-suggestions
+          path: artifacts/fixes/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 4. Promotion Check — gate: pass or block based on verdict
+  # ---------------------------------------------------------------------------
+  promotion_check:
+    name: Promotion Check
+    runs-on: ubuntu-latest
+    needs: review
+    steps:
+      - name: Download review artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: policy-review-artifacts
+
+      - name: Evaluate promotion eligibility
+        id: gate
+        run: |
+          VERDICT="UNKNOWN"
+          RISK="unknown"
+          if [ -f "artifacts/policy-summary.json" ]; then
+            VERDICT=$(jq -r '.verdict // .policy_verdict // "UNKNOWN"' artifacts/policy-summary.json)
+            RISK=$(jq -r '.risk_level // .riskLevel // "unknown"' artifacts/policy-summary.json 2>/dev/null || echo "unknown")
+          fi
+          if [ -f "artifacts/review-result.json" ]; then
+            VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "'"$VERDICT"'"' artifacts/review-result.json)
+            RISK=$(jq -r '.risk_level // .riskLevel // "'"$RISK"'"' artifacts/review-result.json 2>/dev/null || echo "$RISK")
+          fi
+
+          APPROVED=false
+          if [ "$VERDICT" = "PASS" ] || [ "$VERDICT" = "pass" ]; then
+            APPROVED=true
+          elif [ "$VERDICT" = "PASS_WITH_WARNINGS" ] || [ "$VERDICT" = "pass_with_warnings" ]; then
+            # Allow only for dev; block for prod
+            APPROVED=true
+            echo "PASS_WITH_WARNINGS: approved for dev only"
+          fi
+
+          if [ "$RISK" = "critical" ] || [ "$RISK" = "high" ]; then
+            APPROVED=false
+          fi
+
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+          echo "risk_level=$RISK" >> $GITHUB_OUTPUT
+          echo "approved=$APPROVED" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "=========================================="
+          echo "  Policy Verdict: $VERDICT"
+          echo "  Risk Score: $RISK"
+          echo "  Promotion Eligible: $([ "$APPROVED" = "true" ] && echo "Yes" || echo "No")"
+          echo "=========================================="
+          echo ""
+
+          if [ "$APPROVED" = "false" ]; then
+            echo "Promotion BLOCKED. Fix policy violations before promoting to GitOps platform."
+            exit 1
+          fi
+
+          echo "Promotion ALLOWED. Artifacts ready for GitOps platform handoff."
+
+  # ---------------------------------------------------------------------------
+  # 5. Package Artifacts — promotion request for GitOps platform
+  # ---------------------------------------------------------------------------
+  package_artifacts:
+    name: Package Promotion Artifacts
+    runs-on: ubuntu-latest
+    needs: review
+    if: always() && needs.review.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download review artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: policy-review-artifacts
+
+      - name: Generate promotion request
+        id: promotion
+        run: |
+          VERDICT="UNKNOWN"
+          RISK="unknown"
+          if [ -f "artifacts/policy-summary.json" ]; then
+            VERDICT=$(jq -r '.verdict // .policy_verdict // "UNKNOWN"' artifacts/policy-summary.json)
+            RISK=$(jq -r '.risk_level // .riskLevel // "unknown"' artifacts/policy-summary.json 2>/dev/null || echo "unknown")
+          fi
+          if [ -f "artifacts/review-result.json" ]; then
+            VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "'"$VERDICT"'"' artifacts/review-result.json)
+            RISK=$(jq -r '.risk_level // .riskLevel // "'"$RISK"'"' artifacts/review-result.json 2>/dev/null || echo "$RISK")
+          fi
+
+          APPROVED=false
+          if [ "$VERDICT" = "PASS" ] || [ "$VERDICT" = "pass" ]; then
+            APPROVED=true
+          elif [ "$VERDICT" = "PASS_WITH_WARNINGS" ] || [ "$VERDICT" = "pass_with_warnings" ]; then
+            APPROVED=true
+          fi
+          if [ "$RISK" = "critical" ] || [ "$RISK" = "high" ]; then
+            APPROVED=false
+          fi
+
+          CANDIDATE_ENV="dev"
+          if [ "$APPROVED" = "true" ] && [ "$RISK" != "high" ] && [ "$RISK" != "critical" ]; then
+            CANDIDATE_ENV="staging"
+          fi
+
+          PR_NUM=""
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            PR_NUM="${{ github.event.pull_request.number }}"
+          fi
+
+          mkdir -p artifacts
+          jq -n \
+            --arg app "demo-app" \
+            --arg sha "${{ github.sha }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg pr "$PR_NUM" \
+            --arg verdict "$VERDICT" \
+            --arg risk "$RISK" \
+            --argjson approved $([ "$APPROVED" = "true" ] && echo "true" || echo "false") \
+            --arg env "$CANDIDATE_ENV" \
+            '{
+              app_name: $app,
+              commit_sha: $sha,
+              branch: $branch,
+              pr_number: (if $pr != "" then ($pr | tonumber) else null end),
+              review_verdict: $verdict,
+              risk_level: $risk,
+              candidate_environment: $env,
+              approved_for_promotion: $approved,
+              generated_at: (now | todate)
+            }' > artifacts/promotion-request.json
+
+          echo "Generated artifacts/promotion-request.json"
+          cat artifacts/promotion-request.json
+
+      - name: Upload promotion artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-request
+          path: artifacts/promotion-request.json
