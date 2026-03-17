@@ -22,11 +22,11 @@ A small, realistic demo application that:
 ### GitHub Actions (`.github/workflows/ci.yml`)
 
 - Unpinned GitHub Actions (`actions/checkout@v4`, `docker/login-action@v3`, `docker/build-push-action@v6`)
-- Container images using `latest` (`alpine:latest`, `bitnami/kubectl:latest`)
+- Container images using `latest` (`alpine:latest`, `ghcr.io/yannh/kubeconform`)
 - No SBOM generation step
 - No provenance/signing step
 - Deploy job without `environment: production` or approval gate
-- CI stages: Build (GHCR push) → Test (placeholder) → Deploy (kubectl dry-run validation)
+- CI stages: Build (GHCR push) → Test (placeholder) → Deploy (kubeconform manifest validation, no cluster)
 
 ### Kubernetes (`k8s/deployment.yaml`)
 
@@ -53,7 +53,7 @@ A small, realistic demo application that:
 | Category | Examples |
 |----------|----------|
 | Unpinned GitHub Actions | `actions/checkout@v3` → pin by full SHA |
-| Unpinned container image | `alpine:latest`, `bitnami/kubectl:latest`, `python:latest` |
+| Unpinned container image | `alpine:latest`, `kubeconform`, `python:latest` |
 | Missing SBOM generation | No SBOM step in pipeline |
 | Risky Argo sync | `prune: true`, `selfHeal: true` |
 | Missing resource limits | No `resources.requests`/`limits` in Deployment |
@@ -68,6 +68,44 @@ A small, realistic demo application that:
 - **Remediation suggestions** in `artifacts/remediations.json`
 - **PR review comments** in `artifacts/comments.json` / `artifacts/github-comments.json`
 - **Auto-fix suggestions** for pinning actions, images, adding resource limits, etc.
+
+---
+
+## Agent Test Results
+
+The AI DevSecOps Policy Enforcement Agent ran successfully against this demo repo.
+
+### Results summary
+
+| Metric | Value |
+|--------|-------|
+| **Verdict** | FAIL |
+| **Total findings** | 27 |
+| **Critical** | 2 |
+| **High** | 7 |
+| **Medium** | 12 |
+| **Low** | 4 |
+| **Info** | 2 |
+| **Policy set** | fedramp-moderate |
+
+### Artifacts generated
+
+| File | Purpose |
+|------|---------|
+| `artifacts/report.md` | Human-readable review report |
+| `artifacts/review-result.json` | Full review result (findings, verdict, metadata) |
+| `artifacts/policy-summary.json` | Verdict and severity counts |
+| `artifacts/comments.json` | PR/MR comment payloads |
+| `artifacts/github-comments.json` | GitHub-specific comment format |
+| `artifacts/remediations.json` | Remediation suggestions |
+
+### Notable findings
+
+- **Secrets:** Possible plaintext secrets or credentials in the pipeline
+- **Supply chain:** Unpinned images/actions, no SBOM, no signed artifacts
+- **Governance:** No manual promotion gate for production
+- **Argo CD:** Automated sync with prune and selfHeal enabled
+- **Kubernetes:** Missing resource limits and security context in the deployment
 
 ---
 

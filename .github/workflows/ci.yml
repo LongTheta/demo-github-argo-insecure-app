@@ -55,9 +55,6 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     needs: test
-    container:
-      image: bitnami/kubectl:latest
-      options: --entrypoint ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,8 +67,6 @@ jobs:
         run: |
           sed -i "s|image: .*|image: ${{ steps.meta.outputs.tag }}|" k8s/deployment.yaml
 
-      - name: Validate Kubernetes manifests (dry-run)
+      - name: Validate Kubernetes manifests (kubeconform, no cluster required)
         run: |
-          kubectl apply -f k8s/namespace.yaml --dry-run=client --validate=false
-          kubectl apply -f k8s/deployment.yaml --dry-run=client --validate=false
-          kubectl apply -f k8s/service.yaml --dry-run=client --validate=false
+          docker run --rm -v ${{ github.workspace }}:/work -w /work ghcr.io/yannh/kubeconform:v0.7.0 -summary -output text k8s/
