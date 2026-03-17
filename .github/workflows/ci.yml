@@ -94,22 +94,53 @@ jobs:
             || true
           # Agent may exit non-zero on FAIL verdict; we capture artifacts either way
 
+      - name: Debug — list artifacts produced
+        run: |
+          echo "Artifacts in ${{ env.ARTIFACT_DIR }}/:"
+          ls -la ${{ env.ARTIFACT_DIR }}/ 2>/dev/null || echo "(empty or missing)"
+          for f in policy-summary.json review-result.json; do
+            if [ -f "${{ env.ARTIFACT_DIR }}/$f" ]; then
+              echo "--- $f (first 20 lines) ---"
+              head -20 "${{ env.ARTIFACT_DIR }}/$f"
+            fi
+          done
+
       - name: Extract verdict and risk
         id: verdict
         run: |
           VERDICT="UNKNOWN"
           RISK="unknown"
-          if [ -f "${{ env.ARTIFACT_DIR }}/policy-summary.json" ]; then
-            VERDICT=$(jq -r '.verdict // "UNKNOWN"' ${{ env.ARTIFACT_DIR }}/policy-summary.json)
-            RISK=$(jq -r '.risk_level // .riskLevel // "unknown"' ${{ env.ARTIFACT_DIR }}/policy-summary.json 2>/dev/null || echo "unknown")
+          AD="${{ env.ARTIFACT_DIR }}"
+          # Try policy-summary.json
+          if [ -f "$AD/policy-summary.json" ]; then
+            V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "UNKNOWN"' "$AD/policy-summary.json" 2>/dev/null)
+            [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+            R=$(jq -r '.risk_level // .riskLevel // .risk // "unknown"' "$AD/policy-summary.json" 2>/dev/null)
+            [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
+            # Derive risk from severity_counts if risk_level missing
+            if [ "$RISK" = "unknown" ] || [ "$RISK" = "null" ]; then
+              CRIT=$(jq -r '.severity_counts.critical // 0' "$AD/policy-summary.json" 2>/dev/null || echo 0)
+              HIGH=$(jq -r '.severity_counts.high // 0' "$AD/policy-summary.json" 2>/dev/null || echo 0)
+              [ "${CRIT:-0}" -gt 0 ] && RISK="critical"
+              [ "${HIGH:-0}" -gt 0 ] && [ "$RISK" = "unknown" ] && RISK="high"
+            fi
           fi
-          if [ -f "${{ env.ARTIFACT_DIR }}/review-result.json" ]; then
-            VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "'"$VERDICT"'"' ${{ env.ARTIFACT_DIR }}/review-result.json)
-            RISK=$(jq -r '.risk_level // .riskLevel // "'"$RISK"'"' ${{ env.ARTIFACT_DIR }}/review-result.json 2>/dev/null || echo "$RISK")
+          # Try review-result.json (overrides)
+          if [ -f "$AD/review-result.json" ]; then
+            V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "'"$VERDICT"'"' "$AD/review-result.json" 2>/dev/null)
+            [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+            R=$(jq -r '.risk_level // .riskLevel // .risk // "'"$RISK"'"' "$AD/review-result.json" 2>/dev/null)
+            [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
           fi
-          # Ensure policy-summary exists for downstream jobs (handoff contract)
-          if [ ! -f "${{ env.ARTIFACT_DIR }}/policy-summary.json" ]; then
-            jq -n --arg v "$VERDICT" --arg r "$RISK" '{verdict: $v, risk_level: $r}' > ${{ env.ARTIFACT_DIR }}/policy-summary.json
+          # Normalize verdict (agent may use lowercase)
+          case "$VERDICT" in
+            fail|FAIL) VERDICT="FAIL" ;;
+            pass|PASS) VERDICT="PASS" ;;
+            pass_with_warnings|PASS_WITH_WARNINGS) VERDICT="PASS_WITH_WARNINGS" ;;
+          esac
+          # Ensure policy-summary exists for downstream jobs
+          if [ ! -f "$AD/policy-summary.json" ]; then
+            jq -n --arg v "$VERDICT" --arg r "$RISK" '{verdict: $v, risk_level: $r}' > "$AD/policy-summary.json"
           fi
           echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
           echo "risk_level=$RISK" >> $GITHUB_OUTPUT
@@ -202,13 +233,28 @@ jobs:
           VERDICT="UNKNOWN"
           RISK="unknown"
           if [ -f "artifacts/policy-summary.json" ]; then
-            VERDICT=$(jq -r '.verdict // .policy_verdict // "UNKNOWN"' artifacts/policy-summary.json)
-            RISK=$(jq -r '.risk_level // .riskLevel // "unknown"' artifacts/policy-summary.json 2>/dev/null || echo "unknown")
+            V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "UNKNOWN"' artifacts/policy-summary.json 2>/dev/null)
+            [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+            R=$(jq -r '.risk_level // .riskLevel // .risk // "unknown"' artifacts/policy-summary.json 2>/dev/null)
+            [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
+            if [ "$RISK" = "unknown" ] || [ "$RISK" = "null" ]; then
+              CRIT=$(jq -r '.severity_counts.critical // 0' artifacts/policy-summary.json 2>/dev/null || echo 0)
+              HIGH=$(jq -r '.severity_counts.high // 0' artifacts/policy-summary.json 2>/dev/null || echo 0)
+              [ "${CRIT:-0}" -gt 0 ] && RISK="critical"
+              [ "${HIGH:-0}" -gt 0 ] && [ "$RISK" = "unknown" ] && RISK="high"
+            fi
           fi
           if [ -f "artifacts/review-result.json" ]; then
-            VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "'"$VERDICT"'"' artifacts/review-result.json)
-            RISK=$(jq -r '.risk_level // .riskLevel // "'"$RISK"'"' artifacts/review-result.json 2>/dev/null || echo "$RISK")
+            V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "'"$VERDICT"'"' artifacts/review-result.json 2>/dev/null)
+            [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+            R=$(jq -r '.risk_level // .riskLevel // .risk // "'"$RISK"'"' artifacts/review-result.json 2>/dev/null)
+            [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
           fi
+          case "$VERDICT" in
+            fail|FAIL) VERDICT="FAIL" ;;
+            pass|PASS) VERDICT="PASS" ;;
+            pass_with_warnings|PASS_WITH_WARNINGS) VERDICT="PASS_WITH_WARNINGS" ;;
+          esac
 
           APPROVED=false
           if [ "$VERDICT" = "PASS" ] || [ "$VERDICT" = "pass" ]; then
@@ -265,13 +311,28 @@ jobs:
           VERDICT="UNKNOWN"
           RISK="unknown"
           if [ -f "artifacts/policy-summary.json" ]; then
-            VERDICT=$(jq -r '.verdict // .policy_verdict // "UNKNOWN"' artifacts/policy-summary.json)
-            RISK=$(jq -r '.risk_level // .riskLevel // "unknown"' artifacts/policy-summary.json 2>/dev/null || echo "unknown")
+            V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "UNKNOWN"' artifacts/policy-summary.json 2>/dev/null)
+            [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+            R=$(jq -r '.risk_level // .riskLevel // .risk // "unknown"' artifacts/policy-summary.json 2>/dev/null)
+            [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
+            if [ "$RISK" = "unknown" ] || [ "$RISK" = "null" ]; then
+              CRIT=$(jq -r '.severity_counts.critical // 0' artifacts/policy-summary.json 2>/dev/null || echo 0)
+              HIGH=$(jq -r '.severity_counts.high // 0' artifacts/policy-summary.json 2>/dev/null || echo 0)
+              [ "${CRIT:-0}" -gt 0 ] && RISK="critical"
+              [ "${HIGH:-0}" -gt 0 ] && [ "$RISK" = "unknown" ] && RISK="high"
+            fi
           fi
           if [ -f "artifacts/review-result.json" ]; then
-            VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "'"$VERDICT"'"' artifacts/review-result.json)
-            RISK=$(jq -r '.risk_level // .riskLevel // "'"$RISK"'"' artifacts/review-result.json 2>/dev/null || echo "$RISK")
+            V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "'"$VERDICT"'"' artifacts/review-result.json 2>/dev/null)
+            [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+            R=$(jq -r '.risk_level // .riskLevel // .risk // "'"$RISK"'"' artifacts/review-result.json 2>/dev/null)
+            [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
           fi
+          case "$VERDICT" in
+            fail|FAIL) VERDICT="FAIL" ;;
+            pass|PASS) VERDICT="PASS" ;;
+            pass_with_warnings|PASS_WITH_WARNINGS) VERDICT="PASS_WITH_WARNINGS" ;;
+          esac
 
           APPROVED=false
           if [ "$VERDICT" = "PASS" ] || [ "$VERDICT" = "pass" ]; then

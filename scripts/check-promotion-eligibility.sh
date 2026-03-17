@@ -12,13 +12,28 @@ VERDICT="UNKNOWN"
 RISK="unknown"
 
 if [ -f "$ARTIFACT_DIR/policy-summary.json" ]; then
-  VERDICT=$(jq -r '.verdict // .policy_verdict // "UNKNOWN"' "$ARTIFACT_DIR/policy-summary.json")
-  RISK=$(jq -r '.risk_level // .riskLevel // "unknown"' "$ARTIFACT_DIR/policy-summary.json" 2>/dev/null || echo "unknown")
+  V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "UNKNOWN"' "$ARTIFACT_DIR/policy-summary.json" 2>/dev/null)
+  [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+  R=$(jq -r '.risk_level // .riskLevel // .risk // "unknown"' "$ARTIFACT_DIR/policy-summary.json" 2>/dev/null)
+  [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
+  if [ "$RISK" = "unknown" ] || [ "$RISK" = "null" ]; then
+    CRIT=$(jq -r '.severity_counts.critical // 0' "$ARTIFACT_DIR/policy-summary.json" 2>/dev/null || echo 0)
+    HIGH=$(jq -r '.severity_counts.high // 0' "$ARTIFACT_DIR/policy-summary.json" 2>/dev/null || echo 0)
+    [ "${CRIT:-0}" -gt 0 ] && RISK="critical"
+    [ "${HIGH:-0}" -gt 0 ] && [ "$RISK" = "unknown" ] && RISK="high"
+  fi
 fi
 if [ -f "$ARTIFACT_DIR/review-result.json" ]; then
-  VERDICT=$(jq -r '.verdict // .policy_verdict // .policyVerdict // "'"$VERDICT"'"' "$ARTIFACT_DIR/review-result.json")
-  RISK=$(jq -r '.risk_level // .riskLevel // "'"$RISK"'"' "$ARTIFACT_DIR/review-result.json" 2>/dev/null || echo "$RISK")
+  V=$(jq -r '.verdict // .policy_verdict // .policyVerdict // .result.verdict // "'"$VERDICT"'"' "$ARTIFACT_DIR/review-result.json" 2>/dev/null)
+  [ "$V" != "null" ] && [ -n "$V" ] && VERDICT="$V"
+  R=$(jq -r '.risk_level // .riskLevel // .risk // "'"$RISK"'"' "$ARTIFACT_DIR/review-result.json" 2>/dev/null)
+  [ "$R" != "null" ] && [ -n "$R" ] && RISK="$R"
 fi
+case "$VERDICT" in
+  fail|FAIL) VERDICT="FAIL" ;;
+  pass|PASS) VERDICT="PASS" ;;
+  pass_with_warnings|PASS_WITH_WARNINGS) VERDICT="PASS_WITH_WARNINGS" ;;
+esac
 
 APPROVED=false
 if [ "$VERDICT" = "PASS" ] || [ "$VERDICT" = "pass" ]; then
