@@ -27,12 +27,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set image tag (lowercase for GHCR)
+        id: meta
+        run: echo "tag=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]'):latest" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}:latest
+          tags: ${{ steps.meta.outputs.tag }}
 
   test:
     name: Test
@@ -58,9 +62,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set image tag (lowercase for GHCR)
+        id: meta
+        run: echo "tag=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]'):latest" >> $GITHUB_OUTPUT
+
       - name: Replace placeholder image in deployment
         run: |
-          sed -i "s|image: .*|image: ghcr.io/${{ github.repository }}:latest|" k8s/deployment.yaml
+          sed -i "s|image: .*|image: ${{ steps.meta.outputs.tag }}|" k8s/deployment.yaml
 
       - name: Validate Kubernetes manifests (dry-run)
         run: |
